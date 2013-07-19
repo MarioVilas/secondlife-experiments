@@ -50,6 +50,7 @@ class LoginProxy:
 
     def login_to_simulator(self, *arg_list):
         login_req = arg_list[0]     # should be a dictionary
+##        print repr(login_req)       # XXX
 
         # Log login attempt
         first   = login_req['first']
@@ -69,6 +70,7 @@ class LoginProxy:
         # Send request to real login server
         server      = xmlrpclib.ServerProxy(self.loginURI)
         login_resp  = server.login_to_simulator(login_req)
+##        print repr(login_resp)      # XXX
 
         # Parse response
         login                       = login_resp['login']

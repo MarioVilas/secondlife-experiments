@@ -87,13 +87,17 @@ class SLTemplate:
                 '\t%(messageEncoding)s'
                 '\n'
                 )
-    fmtSingleBlockStart  = (
+    fmtSingleBlockStart = (
                 '\t{\n'
                 '\t\t%(blockName)s\t%(blockType)s\n'
                 )
     fmtMultiBlockStart   = (
                 '\t{\n'
                 '\t\t%(blockName)s\t%(blockType)s\t%(blockCount)s\n'
+                )
+    fmtVarBlockStart  = (
+                '\t{\n'
+                '\t\t%(blockName)s\t%(blockType)s\t%(i)s\n'
                 )
     fmtSingleParameter = (
                 '\t\t{\t'
@@ -228,7 +232,7 @@ class SLTemplate:
                     msgcount_fixed += 1
                 snumber = number
                 if snumber[:2] == '0x':
-                    number = long(snumber[2:], 0x10)
+                    number = long(snumber, 0x10)
                 else:
                     number = long(snumber)
                 if number == 0:
@@ -503,18 +507,23 @@ class SLMessage:
             blockType                   = blockTemplate.bltype
             if blockType == 'Multiple':
                 blockCount              = blockTemplate.count
-            else:
+            elif blockType == 'Variable':
+                blockCount              = len(decodedData[blockName])
+            elif blockType == 'Single':
                 blockCount              = 1
+            else:
+                raise SLException, "Who's been messing with the templates?"
 
             # for each block's chunk...
             for i in range(blockCount):
-                if blockType == 'Multiple':
-                    text               += SLTemplate.fmtMultiBlockStart % vars()
-                else:
-                    text               += SLTemplate.fmtSingleBlockStart % vars()
                 if blockType == 'Single':
+                    text               += SLTemplate.fmtSingleBlockStart % vars()
                     blockData           = decodedData[blockName]
                 else:
+                    if blockType == 'Multiple':
+                        text           += SLTemplate.fmtMultiBlockStart % vars()
+                    else:
+                        text           += SLTemplate.fmtVarBlockStart % vars()
                     blockData           = decodedData[blockName][i]
 
                 # for each parameter...

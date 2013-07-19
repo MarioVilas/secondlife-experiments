@@ -14,6 +14,7 @@ import xmlrpclib
 
 from Logger import Log, loadLogFileSettings
 from XMLRPCServer import XMLRPCServer
+from MessageFilter import MessageFilterDispatcher
 from SLTemplate import SLTemplate, HexDumper
 from SLPacket import SLPacket
 import SLTypes
@@ -30,6 +31,8 @@ class SimProxy:
         loadLogFileSettings(self.cfg)
 
         self.loadCaptureSettings()
+        self.loadMessageTemplate()
+        self.loadMessageFilters()
 
         self.sims           = {}                # (ip, port) -> sim
         self.lock           = threading.RLock()
@@ -69,7 +72,6 @@ class SimProxy:
         else:
             self.cap_file       = None
 
-
         self.server = XMLRPCServer(self, 'XMLRPC')
         self.server.register_function(self.newSim)
         self.server.start()
@@ -87,6 +89,9 @@ class SimProxy:
     def loadMessageTemplate(self):
         templateFile        = self.cfg.get(self.section,    'messageTemplate')
         self.slTemplate     = SLTemplate(templateFile)
+
+    def loadMessageFilters(self):
+        self.msgFilter      = MessageFilterDispatcher(self)
 
     def loadCaptureSettings(self):
         section             = 'SimProxy'
@@ -222,6 +227,7 @@ class SimProxy:
         try:
             packet = SLPacket(rawPacket, self.slTemplate)
         except Exception, e:
+            raise                                           # XXX
             s += 'Exception: %s\n' % str(e)
             s += 'PACKET (%d bytes)\n' % len(rawPacket)
             s += HexDumper.dumpBlock(rawPacket, 32)
@@ -233,6 +239,7 @@ class SimProxy:
         try:
             s += packet.dump(decodeData = True)
         except Exception, e:
+##            raise                                           # XXX
             s += 'Exception: %s\n' % str(e)
             try:
                 s += packet.dump(decodeData = False)
@@ -361,6 +368,7 @@ class Sim:
             raise
         toAddr = self.simAddr
         self.proxy.sniff(rawPacket, fromAddr, toAddr)
+        self.filterClientToServer(rawPacket, fromAddr, toAddr)
         try:
             clientSock = self.connectClient(fromAddr)
         except Exception, e:
@@ -392,6 +400,7 @@ class Sim:
             raise
         toAddr = self.sockToAddr[clientSock]
         self.proxy.sniff(rawPacket, fromAddr, toAddr)
+        self.filterServerToClient(rawPacket, fromAddr, toAddr)
         try:
             sentBytes = self.serverSock.sendto(rawPacket, toAddr)
         except Exception, e:
@@ -401,6 +410,25 @@ class Sim:
                 )
             self.suicide()
             raise
+
+    def __filterPacket(self, isClient, rawPacket, fromAddr, toAddr):
+        try:
+            packet = SLPacket(rawPacket, self.proxy.slTemplate)
+            params = (packet, fromAddr, toAddr)
+            result = self.proxy.msgFilter.run(self.proxy, isClient, *params)
+            (newPacket, fromAddr, toAddr) = result
+            if newPacket != packet:
+                rawPacket = str(newPacket)
+            return (rawPacket, fromAddr, toAddr)
+        except Exception, e:
+            raise                       # XXX
+            return params
+
+    def filterClientToServer(self, *listArgs, **dictArgs):
+        self.__filterPacket(True, *listArgs, **dictArgs)
+
+    def filterServerToClient(self, *listArgs, **dictArgs):
+        self.__filterPacket(False, *listArgs, **dictArgs)
 
     def logErrorForSock(self, sock, errtext):
         if not self.loggedErrorForSock.has_key(sock):

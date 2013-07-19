@@ -94,7 +94,7 @@ class LLVector3(LLVector3d):
 class LLVector4(LLVector4d):
     pass
 
-class LLQuaternion(LLVector4d):
+class LLQuaternion(LLVector3d):
     pass
 
 class BOOL(SLType):
