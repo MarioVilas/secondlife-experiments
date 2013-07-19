@@ -29,22 +29,22 @@ __all__ =   [
 
 # base class only, not a real data type
 class SLType:
-    def __init__(self):
-        raise Exception, "You should not instantiate these objects!"
+##    def __init__(self):
+##        raise Exception, "You should not instantiate these objects!"
 
     @classmethod
-    def decode(cls, data, offset):
-        value = unpack(cls.fmt, data[offset:offset+cls.size])
+    def decode(self, data, offset):
+        value = unpack(self.fmt, data[offset:offset+self.size])
         if len(value) == 1:
             value = value[0]
-        return offset + cls.size, value
+        return offset + self.size, value
 
     @classmethod
-    def encode(cls, value):
-        if len(cls.fmt) <= 2:
-            return pack(cls.fmt, value)
+    def encode(self, value):
+        if len(self.fmt) <= 2:
+            return pack(self.fmt, value)
         else:
-            return pack(cls.fmt, *value)
+            return pack(self.fmt, *value)
 
 class U8(SLType):
     fmt  = 'B'
@@ -101,11 +101,11 @@ class BOOL(SLType):
     size = 1
 
     @classmethod
-    def decode(cls, data, offset):
-        return offset + cls.size, bool(ord(data[offset]))
+    def decode(self, data, offset):
+        return offset + self.size, bool(ord(data[offset]))
 
     @classmethod
-    def encode(cls, value):
+    def encode(self, value):
         return chr(bool(value))
 
 class LLUUID(SLType):
@@ -113,17 +113,17 @@ class LLUUID(SLType):
     size = 16
 
     @classmethod
-    def decode(cls, data, offset):
+    def decode(self, data, offset):
         luuid_bin = data[offset:offset+16]
         s = ''
         for c in luuid_bin:
             s += hex(ord(c))[2:].zfill(2)
         for i in ( 8, 13, 18, 23 ):
             s = s[:i] + '-' + s[i:]
-        return offset + cls.size, s
+        return offset + self.size, s
 
     @classmethod
-    def encode(cls, value):
+    def encode(self, value):
         value = value.replace('-', '')
         s = ''
         for i in range(0, len(value), 2):
@@ -133,7 +133,7 @@ class LLUUID(SLType):
 class IPADDR(U32):
 
     @classmethod
-    def decode(cls, data, offset):
+    def decode(self, data, offset):
         offset, ip = U32.decode(data, offset)
         ip = '%d.%d.%d.%d' % (
             (ip >>  0) & 0xff,
@@ -143,7 +143,7 @@ class IPADDR(U32):
         return offset, ip
 
     @classmethod
-    def encode(cls, value):
+    def encode(self, value):
         ip = [int(x) for x in value.split('.')]
         return pack('4B',*ip)
 
@@ -153,43 +153,37 @@ class IPPORT(U16):
 class Fixed(SLType):
 
     @classmethod
-    def decode(cls, data, offset, size):
+    def decode(self, data, offset, size):
         chunk = data[offset:offset+size]
         missing = size - len(chunk)
         if missing:
-            raise Exception, "Missing %i bytes in Fixed parameter" % missing
+            raise Exception, "Missing %i bytes in parameter" % missing
         return offset + size, chunk
 
     @classmethod
-    def encode(cls, value, size):
+    def encode(self, value, size):
         if size != len(value):
-            raise Exception, "Bad Fixed size: %r" % size
-        v = value[0:size]
-        p = '\0' * (size - len(v))
-        return p + v
+            raise Exception, "Bad size in parameter: %r" % size
+        return value
+##        v = value[0:size]
+##        p = '\0' * (size - len(v))
+##        return p + v
 
 class Variable(SLType):
 
     @classmethod
-    def decode(cls, data, offset, size):
-        if   size == 1:
-            offset, length = U8.decode(data, offset)
-        elif size == 2:
-            offset, length = U16.decode(data, offset)
-        elif size == 4:
-            offset, length = U32.decode(data, offset)
-        else:
-            raise Exception, "Bad Variable size: %r" % size
-        return Fixed.decode(data, offset, length)
+    def decode(self, data, offset, size):
+        for cls in (U8, U16, U32):
+            if size == cls.size:
+                offset, length = cls.decode(data, offset)
+                return Fixed.decode(data, offset, length)
+        raise Exception, "Bad size in parameter: %r" % size
 
     @classmethod
-    def encode(cls, value, size):
+    def encode(self, value, size):
         value  = str(value)
         length = long(len(value))
-        if size == 1:
-            return U8.encode(length)  + value
-        if size == 2:
-            return U16.encode(length) + value
-        if size == 4:
-            return U32.encode(length) + value
-        raise Exception, "Invalid Variable size: %r" % size
+        for cls in (U8, U16, U32):
+            if size == cls.size:
+                return cls.encode(length) + Fixed.encode(value, length)
+        raise Exception, "Bad size in parameter: %r" % size

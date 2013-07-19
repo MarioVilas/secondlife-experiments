@@ -1,6 +1,7 @@
 # Simple text logger
 # by Mario Vilas (mvilas at gmail.com)
 
+import sys
 import time
 import threading
 import traceback
@@ -52,9 +53,13 @@ class Logger:
 
     __call__ = log
 
-    def logException(self, level = 1):
+    def logException(self, level = 1, print_tb = True):
         if self.debugMode:
-            self.log(level, traceback.format_exc(self.log_tb_limit))
+            if print_tb:
+                self.log(level, traceback.format_exc(self.log_tb_limit))
+            else:
+                etype, value, tb = sys.exc_info()
+                self.log(level, traceback.format_exception(etype, value, None))
 
 ###############################################################################
 

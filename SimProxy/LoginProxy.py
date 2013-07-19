@@ -54,7 +54,11 @@ class LoginProxy:
         self.cfg.load(self, self.loginProxySettings)
 
         if self.capProxyURI:
-            self.mangler    = CapProxyURIMangler(self.capProxyURI, remote = True)
+            self.mangler    = CapProxyURIMangler(
+                                self.capProxyURI,
+                                self.simProxyURI,
+                                remote = True
+                                )
 
         self.server = XMLRPCServer(self, self.section)
         self.server.register_function(self.login_to_simulator)

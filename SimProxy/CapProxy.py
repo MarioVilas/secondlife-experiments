@@ -9,8 +9,10 @@ import urlparse
 import urllib2
 import re
 import base64
+import struct
+import zlib
 
-
+from sllib import SLTypes
 from sllib.Logger import Log
 from sllib.Config import Config
 from sllib.LLSD import LLSD
@@ -28,8 +30,10 @@ class CapProxy:
                        }
     settings        = {
                         'CapProxy': {
-                                    'interceptURLs' : 'bool',
-                                    'useSimProxy'   : 'bool',
+                                    'interceptURLs'     : 'bool',
+                                    'useSimProxy'       : 'bool',
+                                    'captureFile'       : 'string',
+                                    'captureCompression': 'int',
                                     }
                        }
 
@@ -40,15 +44,26 @@ class CapProxy:
     def start(self):
         Log.loadSettings(self.cfg, self.section)
 
-        self.loginProxyURI  = None
+        self.loginProxyURI      = None
         self.cfg.load(self, self.uriSettings)
 
-        self.interceptURLs  = False
-        self.useSimProxy    = False
+        self.interceptURLs      = False
+        self.useSimProxy        = False
+        self.captureFile        = ''
+        self.captureCompression = 9
         self.cfg.load(self, self.settings)
 
+        if self.captureFile:
+            Log(1, "Storing HTTP transactions in file %r" % self.captureFile)
+            self.captureFile    = open(self.captureFile, 'a+b')
+        else:
+            self.captureFile    = None
+
         self.server         = WebServer(self, self.section, CapProxyHandler)
-        self.server.mangler = CapProxyURIMangler(self.capProxyURI, remote = False)
+        self.server.mangler = CapProxyURIMangler(self.capProxyURI,
+                                                 self.simProxyURI,
+                                                 remote = False
+                                                )
         self.server.sim     = CapProxySimIntercept(self.simProxyURI)
         self.server.main    = self
         self.server.start()
@@ -58,14 +73,47 @@ class CapProxy:
         Log(1, "CapProxy shut down")
 
 
+class CapProxyCapture:
+
+    @classmethod
+    def packRequest(self, path, request, level = 9):
+        data = '\x01' + path + '\x00' + request
+        return self._pack(data, level)
+
+    @classmethod
+    def packResponse(self, response, level = 9):
+        data = '\x00' + response
+        return self._pack(data, level)
+
+    @classmethod
+    def _pack(self, data, level = 9):
+        data = zlib.compress(data, level)
+        data = SLTypes.Variable.encode(data, 4)
+        return data
+
+    @classmethod
+    def unpack(self, capture, offset):
+        offset, data        = SLTypes.Variable.decode(capture, offset, 4)
+        data                = zlib.decompress(data)
+        is_request          = bool(ord(data[0]))
+        if is_request:
+            path, request   = data[1:].split('\x00')
+            text            = 'From %s\r\nRequest:\r\n%s' % (path, request)
+        else:
+            response        = data[1:]
+            text            = 'Response:\r\n%s' % response
+        return offset, text
+
+
 class CapProxyURIMangler:
     __url_find = re.compile('https?://[^<]+', re.I)
 
-    def __init__(self, uri, remote = False):
+    def __init__(self, uri, sp_uri, remote = False):
         if not urlparse.urlsplit(uri)[0]:
             raise Exception, "Should be an absolute URI: %r" % uri
         self.__absolute = uri
         self.__relative = self.relative(uri)
+        self.__sp_uri   = sp_uri
         self.__remote   = remote
         self.__seed     = {}
 
@@ -79,8 +127,6 @@ class CapProxyURIMangler:
     def unmangle(self, uri):
         uri = self.relative(uri)
         uri = uri[ len(self.__relative) : ]
-        if not uri.isdigit():
-            return self.unquote(uri)
         return self.getSeed(uri)
 
     def __do_xml(self, xml, do_mangle = True):
@@ -127,7 +173,7 @@ class CapProxyURIMangler:
     def newSeed(self, uri):
         Log(1, "Discovered seed capabilities URI %s" % uri)
         if self.__remote:
-            simProxy    = xmlrpclib.ServerProxy(self.simProxyURI)
+            simProxy    = xmlrpclib.ServerProxy(self.__sp_uri)
             hashed_uri  = simProxy.newSeed(uri)
         else:
             hashed_uri  = hash(uri)
@@ -142,9 +188,11 @@ class CapProxyURIMangler:
         if self.__seed.has_key(hashed_uri):
             uri         = self.__seed[hashed_uri]
         else:
-            simProxy    = xmlrpclib.ServerProxy(self.simProxyURI)
+            simProxy    = xmlrpclib.ServerProxy(self.__sp_uri)
             uri         = simProxy.getSeed(hashed_uri)
         Log(2, "Received capabilities URI: %s" % uri)
+        if hash(uri) != hashed_uri:
+            Log(1, "Bad hashed URI: (%d != %d) %s" % (hash(uri), hashed_uri, uri))
         return uri
 
 
@@ -240,7 +288,7 @@ class CapProxyHandler(RequestHandler):
                 chunk_size = min(size_remaining, max_chunk_size)
                 L.append(self.rfile.read(chunk_size))
                 size_remaining -= len(L[-1])
-            data = ''.join(L)
+            request = ''.join(L)
 
             # If the request is not mangled, return a 404 error
             path = self.path
@@ -251,44 +299,68 @@ class CapProxyHandler(RequestHandler):
                     'Content-length: 0\r\n\r\n',
                     None)
 
+            # Store the request
+            fd = self.server.main.captureFile
+            if fd:
+                cap_level = self.server.main.captureCompression
+                cap_data = CapProxyCapture.packRequest(path, request, cap_level)
+                fd.write(cap_data)
+
             # Unmangle the request
 ##            while self.server.mangler.is_mangled(path):
             Log(3, 'Mangled URI: %s' % path)
             path = self.server.mangler.unmangle(path)
             Log(2, "Requested URI: %s" % path)
-            Log(3, "Request data: %r" % data)
-            unmangled_data = self.server.mangler.unmangle_xml(data)
-            if unmangled_data != data:
-                data = unmangled_data
-                Log(3, "Unmangled request data: %r" % data)
+            Log(3, "Request data: %r" % request)
+            unmangled_req = self.server.mangler.unmangle_xml(request)
+            if unmangled_req != request:
+                request = unmangled_req
+                Log(3, "Unmangled request data: %r" % request)
+
+            # Store the request
+            fd = self.server.main.captureFile
+            if fd:
+                cap_level = self.server.main.captureCompression
+                cap_data = CapProxyCapture.packRequest(path, request, cap_level)
+                fd.write(cap_data)
 
             # Proxy the request
-            response = urllib2.urlopen(path, data).read()
+            response = urllib2.urlopen(path, request).read()
             Log(3, "Response data: %r" % response)
+
+            # Store the response
+            fd = self.server.main.captureFile
+            if fd:
+                cap_level = self.server.main.captureCompression
+                cap_data = CapProxyCapture.packResponse(response, cap_level)
+                fd.write(cap_data)
 
             # Parse the response
             if self.server.main.interceptURLs:
                 try:
-                    print 1
                     response = self.server.mangler.mangle_xml(response)
-                    print 2
                 except Exception, e:
                     Log.logException()
             if self.server.main.useSimProxy:
                 try:
-                    print 3
                     response = self.server.sim.change_xml(response)
-                    print 4
                 except Exception, e:
                     Log.logException()
-            print 5
 
             # Log the modified response data
             if self.server.main.interceptURLs or self.server.main.useSimProxy:
                 Log(3, "Modified response data: %r" % response)
 
+            # Store the response
+            fd = self.server.main.captureFile
+            if fd:
+                cap_level = self.server.main.captureCompression
+                cap_data = CapProxyCapture.packResponse(response, cap_level)
+                fd.write(cap_data)
+
         except urllib2.HTTPError, e:
             Log.logException(2)
+##            Log.logException(2, print_tb = False)
             if self.request_version != 'HTTP/0.9':
                 self.wfile.write("%s %d %s\r\n" %
                                  (self.protocol_version, e.code, e.msg))

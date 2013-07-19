@@ -57,7 +57,7 @@ class SimProxy:
         self.lock   = threading.RLock()
         self.active = True
 
-##        self.seed   = {}
+        self.seed   = {}
 
         self.worker = Selector(self)
         self.worker.start()
