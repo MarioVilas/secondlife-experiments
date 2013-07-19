@@ -243,7 +243,7 @@ class SLTemplate:
                     msgnum = number + 0xFF00L
                 elif freq == 'Low':
                     msgnum = number + 0xFFFF0000L
-                msg = SLMessage(name, freq, msgnum, trust, encoding)
+                msg = SLMessageTemplate(name, freq, msgnum, trust, encoding)
                 self.byNumber[msgnum]   = msg
                 self.byName[name]       = msg
                 continue
@@ -290,7 +290,7 @@ class SLTemplate:
                 msgnum = number + 0xFF00L
             elif freq == 'Low':
                 msgnum = number + 0xFFFF0000L
-            msg = SLMessage(name, freq, msgnum, trust, encoding)
+            msg = SLMessageTemplate(name, freq, msgnum, trust, encoding)
             self.byNumber[msgnum]   = msg
             self.byName[name]       = msg
 
@@ -322,7 +322,7 @@ class SLTemplate:
                     if len(header) != 2:
                         raise SLException, "Parsing error"
                     count = 1
-                blk = SLBlock(name, bltype, count)
+                blk = SLBlockTemplate(name, bltype, count)
                 msg.blocks.append(blk)
 
                 # parameter definitions
@@ -356,7 +356,7 @@ class SLTemplate:
                         pclass = getattr(SLTypes, ptype)
                     except SLException, e:
                         raise SLException, "Bad parameter type: %s" % ptype
-                    prm = SLParameter(name, ptype, pclass, size)
+                    prm = SLParameterTemplate(name, ptype, pclass, size)
                     blk.parameters.append(prm)
 
                 # closing bracket of each block definition
@@ -447,7 +447,7 @@ class SLTemplate:
         return self.byName[messageName].number
 
 
-class SLMessage:
+class SLMessageTemplate:
 
     def __init__(self, name, freq, number, trust, encoding):
         self.name, self.freq, self.number, self.trust, self.encoding = \
@@ -463,20 +463,14 @@ class SLMessage:
 
     def encode(self, value):
         answer = ''
-
-        if   self.freq == 'High':
-            answer += struct.pack('<B', self.number)
-        elif self.freq == 'Medium':
-            answer += struct.pack('<H', self.number)
-        else:
-            answer += struct.pack('<L', self.number)
-
         for blockTemplate in self.blocks:
             answer += blockTemplate.encode(value[blockTemplate.name])
+        return answer
 
-##        if self.encoding == 'Zeroencode':
-##            raise SLException, "Zeroencode not supported"     # XXX
-
+    def new(self):
+        answer = {}
+        for blockTemplate in self.blocks:
+            answer[blockTemplate.name] = blockTemplate.new()
         return answer
 
     def dumpData(self, decodedData):
@@ -548,7 +542,7 @@ class SLMessage:
         return text
 
 
-class SLBlock:
+class SLBlockTemplate:
 
     def __init__(self, name, bltype, count):
         self.name, self.bltype, self.count = name, bltype, count
@@ -574,6 +568,8 @@ class SLBlock:
                     offset, value = parameterTemplate.decode(data, offset)
                     block[parameterTemplate.name] = value
                 answer.append(block)
+            if self.bltype == 'Multiple':
+                answer = tuple(answer)
         return offset, answer
 
     def encode(self, value):
@@ -593,11 +589,35 @@ class SLBlock:
                 raise SLException, "Who's been messing with the templates?"
             for block in value:
                 for parameterTemplate in self.parameters:
-                    answer += parameterTemplate.encode(block)
+                    data = block[parameterTemplate.name]
+                    answer += parameterTemplate.encode(data)
+        return answer
+
+    def new(self):
+        if self.bltype == 'Single':
+            answer = {}
+            for parameterTemplate in self.parameters:
+                answer[parameterTemplate.name] = parameterTemplate.new()
+        else:
+            answer = []
+            if self.bltype == 'Multiple':
+                count = self.count
+            elif self.bltype == 'Variable':
+                count = 1
+            else:
+                raise SLException, "Who's been messing with the templates?"
+            for i in range(count):
+                block = {}
+                for parameterTemplate in self.parameters:
+                    block[parameterTemplate.name] = parameterTemplate.new()
+                answer.append(block)
+            if self.bltype == 'Multiple':
+                answer = tuple(answer)
+
         return answer
 
 
-class SLParameter:
+class SLParameterTemplate:
 
     def __init__(self, name, ptype, pclass, size = None):
         self.name, self.ptype, self.pclass, self.size = \
@@ -627,7 +647,21 @@ class SLParameter:
         return repr(value)
 
 
+class SLTemplateFactory:
+    loaded      = {}
+    last_loaded = None
+
+    @classmethod
+    def load(self, templateFile = None):
+        if templateFile is None:
+            templateFile = self.last_loaded
+        if not self.loaded.has_key(templateFile):
+            self.loaded[templateFile] = SLTemplate(templateFile)
+            last_loaded = templateFile
+        return self.loaded[templateFile]
+
+
 # some testing code
 if __name__ == '__main__':
-    slt = SLTemplate('templates/1.18.1.2.txt')
+    slt = SLTemplateFactory.load('templates/1.18.1.2.txt')
     slt.dump('testTemplate.txt')

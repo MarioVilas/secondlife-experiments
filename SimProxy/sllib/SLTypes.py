@@ -148,7 +148,7 @@ class IPADDR(U32):
         return pack('4B',*ip)
 
 class IPPORT(U16):
-    pass
+    fmt  = '!H'
 
 class Fixed(SLType):
 

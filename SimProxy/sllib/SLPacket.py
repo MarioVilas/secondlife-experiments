@@ -82,6 +82,30 @@ class SLPacket:
         self.ackList = newlist
         self.__setFlag(len(newlist) != 0, SLPacketConstant.LL_ACK_FLAG)
 
+    def getBlockData(self, force = False):
+        self.encode(force)
+        return self.blockData   # always unencoded
+
+    def getDecodedData(self, force = False):
+        self.decode(force)
+        return self.decodedData
+
+    def setBlockData(self, data):
+        self.blockData = data   # always unencoded
+        self.delDecodedData()
+
+    def setDecodedData(self, data):
+        self.decodedData = data
+        self.delBlockData()
+
+    def delBlockData(self):
+        if hasattr(self, 'blockData'):
+            del self.blockData
+
+    def delDecodedData(self):
+        if hasattr(self, 'decodedData'):
+            del self.decodedData
+
     def __fromData(self, messageNameOrNumber, slTemplate):
         if type(messageNameOrNumber) in types.StringTypes:
             self.messageName    = messageNameOrNumber
@@ -100,16 +124,12 @@ class SLPacket:
             self.setZeroEncoded(True)
         else:
             self.setZeroEncoded(False)
-        self.decodedData = decodedData
-        if hasattr(self, 'blockData'):
-            del self.blockData
+        self.setDecodedData(decodedData)
 ##        self.encode()
 
     def fromBlockData(self, messageNameOrNumber, blockData, slTemplate):
         self.__fromData(messageNameOrNumber, slTemplate)
-        self.blockData = blockData
-        if hasattr(self, 'decodedData'):
-            del self.decodedData
+        self.setBlockData(blockData)
 ##        self.decode()
 
     def fromString(self, rawPacket, slTemplate, decode = False):
@@ -182,18 +202,20 @@ class SLPacket:
         if decode:
             self.decode()
 
-    def decode(self):
-        offset, self.decodedData = \
-            self.messageTemplate.decode(self.blockData, 0)
-        remainder = len(self.blockData) - offset
-        if remainder > 0:
-            raise SLException, "Decoding error, %i bytes not decoded" % remainder
-        elif remainder < 0:
-            raise SLException, "Decoding error, %i bytes were missing" % -remainder
+    def decode(self, force = False):
+        if force or not hasattr(self, 'decodedData'):
+            offset, self.decodedData = \
+                self.messageTemplate.decode(self.blockData, 0)
+            remainder = len(self.blockData) - offset
+            if remainder > 0:
+                raise SLException, "Decoding error, %i bytes not decoded" % remainder
+            elif remainder < 0:
+                raise SLException, "Decoding error, %i bytes were missing" % -remainder
         return self.decodedData
 
-    def encode(self):
-        self.blockData = self.messageTemplate.encode(self.decodedData)
+    def encode(self, force = False):
+        if force or not hasattr(self, 'blockData'):
+            self.blockData = self.messageTemplate.encode(self.decodedData)
         return self.blockData
 
     def zeroDecode(self, data = None):
@@ -227,11 +249,19 @@ class SLPacket:
                 c = data[i]
                 if ord(c) == 0:
                     n += 1
+                    if n == 256:
+                        result += '\x00\xFF'
+                        n = 1
                 else:
-                    result += (n * '\x00') + c
-                    n = 0
-            if len(result) < len(data):
-                return result
+                    if n > 0:
+                        result += '\x00' + chr(n) + c
+                        n = 0
+                    else:
+                        result += c
+                i += 1
+            if n > 0:
+                result += '\x00' + chr(n)
+            return result
         return data
 
     def __str__(self):
@@ -240,8 +270,7 @@ class SLPacket:
         answer += struct.pack('!L', self.sequenceNumber)
         answer += struct.pack('!B', len(self.extraData))
         answer += self.extraData
-        if not hasattr(self, 'blockData'):
-            self.encode()
+        self.encode(force = False)
         if self.isFreqHigh():
             msgnum = struct.pack('>B', self.messageNumber)
         elif self.isFreqMedium():
@@ -270,8 +299,7 @@ class SLPacket:
         packetSize      = headerSize + blockDataSize + extraDataSize + ackSize
 
         if decodeData:
-            if not hasattr(self, 'decodedData'):
-                self.decode()
+            self.decode(force = True)
             dumpedData  = self.messageTemplate.dumpData(self.decodedData)
         else:
             dumpedData  = '  Message: %s\n' % self.messageName
@@ -304,7 +332,7 @@ class SLPacket:
         if ackSize > 0:
             answer += '  ACK: '
             for ack in self.ackList:
-                answer += '0x.2x%, ' % ack
+                answer += '0x%.2x, ' % ack
             answer = answer[:-2]
             answer += '\n'
 

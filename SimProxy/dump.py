@@ -3,20 +3,21 @@
 
 import sys
 import os.path
-import ConfigParser
 
-from SimProxy import SimProxy
-from Logger import Log
+from sllib.Config import Config
+from sllib.Logger import Log
 
-def dump(sp, binfilename, txtfilename):
+from SimProxy import PacketCapture
+
+def dump(pc, binfilename, txtfilename):
     capture     = open(binfilename, 'rb').read()
     textfile    = open(txtfilename, 'w')
     packetCount = 0
     offset      = 0
 
     while( (len(capture) - offset) != 0 ):
-        offset, entry = sp.unpack(capture, offset)
-        text = sp.dump(*entry)
+        offset, entry = pc.unpack(capture, offset)
+        text = pc.dump(*entry)
         if text:
             textfile.write(text)
             packetCount += 1
@@ -36,14 +37,15 @@ if __name__ == "__main__":
     else:
         cfgfilename = 'SimProxy.cfg'
 
-    sp = SimProxy(cfgfilename)
-    sp.loadCaptureSettings()
+    cfg = Config()
+    cfg.read(cfgfilename)
+    pc = PacketCapture(cfg)
 
     if len(sys.argv) > 1:
         binfilename = sys.argv[1]
     else:
-        binfilename = sp.cap_filename
-        if not sp.binaryCapture:
+        binfilename = pc.captureFile
+        if not pc.binaryCapture:
             print "Capture file is already in text format: %s" % binfilename
             exit()
 
@@ -54,9 +56,7 @@ if __name__ == "__main__":
         if txtfilename == binfilename:
             txtfilename = txtfilename + '.txt'
 
-    sp.loadMessageTemplate()
-
     print "Binary file: %s" % binfilename
     print "Text file:   %s" % txtfilename
-    packetCount = dump(sp, binfilename, txtfilename)
+    packetCount = dump(pc, binfilename, txtfilename)
     print "Dumped %d packets" % packetCount

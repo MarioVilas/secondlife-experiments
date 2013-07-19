@@ -1,6 +1,7 @@
 # Second Life simple protocol handler
 # by Mario Vilas (mvilas at gmail.com)
 
+import types
 import random
 import xmlrpclib
 
@@ -103,7 +104,14 @@ class SLClient:
         self.secureSessionID    = login_resp['secure_session_id']
         self.agentID            = login_resp['agent_id']
 
-        circuit_code    = login_resp['circuit_code']
         sim_ip          = login_resp['sim_ip']
         sim_port        = login_resp['sim_port']
-        self.transport.useCircuitCode(circuit_code, (sim_ip, sim_port))
+
+        packet_data = {
+            'Code'      : login_resp['circuit_code'],
+            'SessionID' : self.sessionID,
+            'ID'        : self.agentID,
+        }
+        packet = SLPacket()
+        packet.fromDecodedData('UseCircuitCode', {'CircuitCode':packet_data})
+        self.transport.sendto(str(packet), (sim_ip, sim_port))

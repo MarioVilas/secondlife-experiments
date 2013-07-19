@@ -1,0 +1,20 @@
+[Sun Aug 26 18:45:52 2007] Listening XML-RPC at 0.0.0.0:80
+[Sun Aug 26 18:45:52 2007] LoginProxy loaded successfully
+[Sun Aug 26 18:46:35 2007] User QvasiModo Writer logging in
+[Sun Aug 26 18:46:55 2007] User QvasiModo Writer logged in
+[Sun Aug 26 18:46:55 2007] Seed capability URI found: https://sim4534.agni.lindenlab.com:12043/cap/a70c635d-3b74-81b2-2e8d-408434ad315a
+[Sun Aug 26 18:46:55 2007] Forcing seed capability URI: http://localhost:12005/cap/https%3A//sim4534.agni.lindenlab.com%3A12043/cap/a70c635d-3b74-81b2-2e8d-408434ad315a
+[Sun Aug 26 18:46:55 2007] Sim 63.210.158.184:13004 discovered
+[Sun Aug 26 18:46:55 2007] Requesting new Sim from SimProxy http://localhost:10000/proxy.cgi
+[Sun Aug 26 18:46:55 2007] Forcing Sim redirection 63.210.158.184:13004 -> 127.0.0.1:18372 for QvasiModo Writer
+[Sun Aug 26 18:47:33 2007] LoginProxy shut down
+[Sun Aug 26 18:47:37 2007] Listening XML-RPC at 0.0.0.0:80
+[Sun Aug 26 18:47:37 2007] LoginProxy loaded successfully
+[Sun Aug 26 18:48:16 2007] User QvasiModo Writer logging in
+[Sun Aug 26 18:48:34 2007] User QvasiModo Writer logged in
+[Sun Aug 26 18:48:34 2007] Seed capability URI found: https://sim4534.agni.lindenlab.com:12043/cap/96de3eee-757d-2907-97b6-fdcb158ab0c3
+[Sun Aug 26 18:48:34 2007] Forcing seed capability URI: http://localhost:12005/cap/https%3A//sim4534.agni.lindenlab.com%3A12043/cap/96de3eee-757d-2907-97b6-fdcb158ab0c3
+[Sun Aug 26 18:48:34 2007] Sim 63.210.158.184:13004 discovered
+[Sun Aug 26 18:48:34 2007] Requesting new Sim from SimProxy http://localhost:10000/proxy.cgi
+[Sun Aug 26 18:48:34 2007] Forcing Sim redirection 63.210.158.184:13004 -> 127.0.0.1:18408 for QvasiModo Writer
+[Sun Aug 26 18:52:04 2007] LoginProxy shut down

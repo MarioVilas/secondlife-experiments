@@ -5,25 +5,45 @@ import types
 import string
 import sys
 import os.path
-import ConfigParser
+import urlparse
 
-from SimProxy import SimProxy
-from SLPacket import SLPacket
-from Logger import Log
+from sllib.SLPacket import SLPacket
+from sllib.Config import Config
+from sllib.Logger import Log
+
+from SimProxy import PacketCapture
 
 ###############################################################################
 
 class Ripper:
-    outfolder = './'
+    outfolder        = './'
+    outfolder_failed = './failed/'
+
+    objtype     = 'other'
+    ext         = ''
+
+    objects     = 0
+    meshes      = 0
+    textures    = 0
+    other       = 0
+
+    @classmethod
+    def __write(self, filename, data):
+        open(filename, 'wb').write(data)
+        if self.objtype:
+            counter = getattr(Ripper, self.objtype)
+            counter = counter + 1
+            setattr(Ripper, self.objtype, counter)
 
     @classmethod
     def write(self, uuid, data):
         filename = os.path.join(self.outfolder, uuid + self.ext)
-        open(filename, 'wb').write(data)
+        self.__write(filename, data)
 
     @classmethod
     def writeFailed(self, uuid, data):
-        self.write(uuid + '_failed', data)
+        filename = os.path.join(self.outfolder_failed, uuid + self.ext)
+        self.__write(filename, data)
 
     @classmethod
     def rip(self, message):
@@ -36,8 +56,9 @@ class Ripper:
 class RipperCollection:
 
     class ImageData(Ripper):
-##        ext = '.j2c'
-        ext = '.jp2'
+##        ext         = '.j2c'
+        ext         = '.jp2'
+        objtype     = 'textures'
 
         @classmethod
         def rip(self, message):
@@ -113,7 +134,23 @@ class RipperCollection:
 ##        pass
 
     class ObjectUpdate(Ripper):
-        pass
+        ext     = ''
+        objtype = ''
+        
+        @classmethod
+        def rip(self, message):
+            for objectdata in message['ObjectData']:
+                uuid    = objectdata['FullID']
+                url     = objectdata['MediaURL']
+                if '\x00' in url:
+                    url = url[:url.find('\x00')]
+                if url:
+                    favicon = 'http://' + urlparse.urlsplit(url)[1] + '/favicon.ico'
+                    urlfile = '[InternetShortcut]\r\nURL=%s\r\nIconFile=%s\r\nIconIndex=1\r\n'
+                    urlfile = urlfile % (url, favicon)
+                    self.write(uuid + '.url', urlfile)
+                    Ripper.other += 1
+                # XXX to do...
 
     class ObjectUpdateCompressed(Ripper):
         pass
@@ -156,28 +193,53 @@ ObjectCategory
 ##    class AvatarPropertiesUpdate(Ripper):
 ##        pass
 
+    class ParcelProperties(Ripper):
+        ext     = '.url'
+        objtype = 'other'
+
+        @classmethod
+        def rip(self, message):
+            name    = message['ParcelData']['Name']
+            media   = message['ParcelData']['MediaURL']
+            if '\x00' in name:
+                name  = name[:name.find('\x00')]
+            if '\x00' in media:
+                media = media[:media.find('\x00')]
+            if media:
+                favicon = 'http://' + urlparse.urlsplit(media)[1] + '/favicon.ico'
+                urlfile = '[InternetShortcut]\r\nURL=%s\r\nIconFile=%s\r\nIconIndex=1\r\n'
+                urlfile = urlfile % (media, favicon)
+                self.write(name, urlfile)
+
+##    class ParcelOverlay(Ripper):
+##        pass
+
 ###############################################################################
 
-def rip(sp, binfilename = 'capture.bin', outfolder = './rip'):
+def rip(pc, binfilename = 'capture.bin', outfolder = './rip'):
     capture     = open(binfilename, 'rb').read()
     offset      = 0
-    objects     = 0
-    meshes      = 0
-    textures    = 0
     pktcount    = -1
     pktsuccess  = 0
     pktfailed   = 0
 
-    if not os.path.exists(outfolder):
-        os.makedirs(outfolder)
+    Ripper.objects      = 0
+    Ripper.meshes       = 0
+    Ripper.textures     = 0
+    Ripper.other        = 0
+
+    outfolder_failed = os.path.join(outfolder, 'failed')
+    if not os.path.exists(outfolder_failed):
+        os.makedirs(outfolder_failed)
     Ripper.outfolder = outfolder
+    Ripper.outfolder_failed = outfolder_failed
 
     while( (len(capture) - offset) != 0 ):
         pktcount        = pktcount + 1
-        offset, entry   = sp.unpack(capture, offset)
+        offset, entry   = pc.unpack(capture, offset)
         try:
             rawPacket   = entry[len(entry)-1]
-            packet      = SLPacket(rawPacket, sp.slTemplate)
+            packet      = SLPacket(rawPacket, pc.slTemplate)
             packet.decode()
         except Exception, e:
 ##            print "Exception while decoding packet %d: %s" % (pktcount, str(e))
@@ -201,7 +263,12 @@ def rip(sp, binfilename = 'capture.bin', outfolder = './rip'):
         if type(ripper) == types.ClassType:
             ripper.finalize()
 
-    return (pktcount, pktsuccess, pktfailed, objects, meshes, textures)
+    objects     = Ripper.objects
+    meshes      = Ripper.meshes
+    textures    = Ripper.textures
+    other       = Ripper.other
+
+    return (pktcount, pktsuccess, pktfailed, objects, meshes, textures, other)
 
 if __name__ == "__main__":
     Log.log_level = 0
@@ -216,30 +283,29 @@ if __name__ == "__main__":
     else:
         cfgfilename = 'SimProxy.cfg'
 
-    sp = SimProxy(cfgfilename)
-    sp.loadCaptureSettings()
+    cfg = Config()
+    cfg.read(cfgfilename)
+    pc = PacketCapture(cfg)
 
     if len(sys.argv) > 1:
         binfilename = sys.argv[1]
     else:
-        binfilename = sp.cap_filename
-        if not sp.binaryCapture:
-            print "Error, capture file is in text format: %s" % binfilename
+        binfilename = pc.captureFile
+        if not pc.binaryCapture:
+            print "Capture file is in text format: %s" % binfilename
             exit()
 
     if len(sys.argv) > 2:
         outfolder = sys.argv[2]
     else:
         outfolder = './rip'
-    if not os.path.isdir(outfolder):
-        print "Not a folder: %s" % outfolder
-
-    sp.loadMessageTemplate()
 
     print "Capture file:  %s" % binfilename
     print "Output folder: %s" % outfolder
-    (pktcount, pktsuccess, pktfailed, objects, meshes, textures) = rip(sp, binfilename, outfolder)
+    (pktcount, pktsuccess, pktfailed, objects, meshes, textures, other) = \
+        rip(pc, binfilename, outfolder)
     print "Rip complete! %d packets read (%d successful, %d failed)" % (pktcount, pktsuccess, pktfailed)
     print "  Objects:  %d" % objects
     print "  Meshes:   %d" % meshes
     print "  Textures: %d" % textures
+    print "  Other:    %d" % other

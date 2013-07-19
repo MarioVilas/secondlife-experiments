@@ -3,132 +3,164 @@
 
 import sys
 import os.path
-import ConfigParser
 import socket
 import select
 import time
 import struct
+import traceback
 import thread
 import threading
 import xmlrpclib
+import zlib
 
-from Logger import Log, loadLogFileSettings
-from XMLRPCServer import XMLRPCServer
-from MessageFilter import MessageFilterDispatcher
-from SLTemplate import SLTemplate, HexDumper
-from SLPacket import SLPacket
-import SLTypes
+from sllib.Logger import Log
+from sllib.Config import Config
+from sllib.XMLRPCServer import XMLRPCServer
+from sllib.SLPacketFilter import SLPacketFilter
+from sllib.SLTemplate import SLTemplateFactory, HexDumper
+from sllib.SLPacket import SLPacket
+from sllib import SLTypes
 
 
 class SimProxy:
-    section = 'SimProxy'
+    section         = 'SimProxy'
+    xmlrpc_section  = 'SimProxy-XMLRPC'
+    settings    = {
+                    'URI': {
+                                'loginProxyURI' : 'string',
+                                'capProxyURI'   : 'string',
+                                'simProxyURI'   : 'string',
+                           },
+                    'SimProxy': {
+                                'simHost'       : 'ipaddr',
+                                'bindAddress'   : 'ipaddr',
+                                'bindPort'      : 'int',
+                                'simList'       : 'list',
+                                'bindAddress'   : 'string',
+                                'bindAddress'   : 'string',
+                                },
+                  }
 
     def __init__(self, configFilename):
-        self.cfg = ConfigParser.SafeConfigParser()
+        self.cfg = Config()
         self.cfg.read(configFilename)
 
     def start(self):
-        loadLogFileSettings(self.cfg)
+        Log.loadSettings(self.cfg, self.section)
+        self.loadSettings()
 
-        self.loadCaptureSettings()
-        self.loadMessageTemplate()
-        self.loadMessageFilters()
+        self.pktCapture = PacketCapture(self.cfg)
+        self.pktCapture.start()
 
-        self.sims           = {}                # (ip, port) -> sim
-        self.lock           = threading.RLock()
-        self.active         = True
+        self.msgFilter  = SLPacketFilter(self)
 
-        self.bindAddress    = self.cfg.get(self.section,    'bindAddress')
-        self.simHost        = self.cfg.get(self.section,    'simHost')
+        self.lock   = threading.RLock()
+        self.active = True
 
-        try:
-            self.bindAddress = socket.gethostbyname(self.bindAddress)
-        except Exception, e:
-            pass
+##        self.seed   = {}
 
-        try:
-            self.simHost    = socket.gethostbyname(self.simHost)
-        except Exception, e:
-            pass
+        self.worker = Selector(self)
+        self.worker.start()
 
-        if self.cfg.has_option(self.section,                'proxyBindPort'):
-            proxyBindPort   = self.cfg.getint(self.section, 'proxyBindPort')
-            proxyList       = self.cfg.get(self.section,    'proxyList')
-            proxyList       = proxyList.replace(' ','').split(',')
-            for proxySim in proxyList:
-                if proxySim == '': continue
-                proxySim    = proxySim.split(':')
-                proxySim    = proxySim[0], int(proxySim[1])
-                try:
-                    proxySim    = (socket.gethostbyname(proxySim[0]), proxySim[1])
-                except Exception, e:
-                    pass
-                proxyBindPort   = self.newSim(proxySim, proxyBindPort)[1]
-                proxyBindPort   = proxyBindPort + 1
-
-        if self.cap_filename:
-            Log(1, "Storing captured packets in %s" % self.cap_filename)
-            self.cap_file   = open(self.cap_filename, 'a+b')
-        else:
-            self.cap_file       = None
-
-        self.server = XMLRPCServer(self, 'XMLRPC')
+        self.server = XMLRPCServer(self, self.xmlrpc_section)
         self.server.register_function(self.newSim)
+        self.server.register_function(self.newSeed)
+        self.server.register_function(self.getSeed)
         self.server.start()
+
         Log(1, "SimProxy loaded successfully")
 
     def kill(self):
         Log(1, "Shutting down SimProxy...")
         self.active = False
-##        self.lock.acquire()
-        while self.sims:
-            sim = self.sims[ self.sims.keys()[0] ].kill()
-##        self.lock.release()
+        self.worker.kill()
         Log(1, "Shut down SimProxy")
 
-    def loadMessageTemplate(self):
-        templateFile        = self.cfg.get(self.section,    'messageTemplate')
-        self.slTemplate     = SLTemplate(templateFile)
+    def loadSettings(self):
+        self.simProxyURI    = None
+        self.capProxyURI    = None
+        self.loginProxyURI  = None
+        self.bindAddress    = '0.0.0.0'
+        self.bindPort       = 0
+        self.simList        = []
 
-    def loadMessageFilters(self):
-        self.msgFilter      = MessageFilterDispatcher(self)
+        self.cfg.load(self, self.settings)
 
-    def loadCaptureSettings(self):
-        section             = 'SimProxy'
+        if self.bindPort:
+            bindPort = self.bindPort
+            for sim in self.simList:
+                if sim == '': continue
+                simAddress, simPort = sim.split(':')
+                simPort = int(simPort) & 0xFFFF
+                try:
+                    simAddress = socket.gethostbyname(simAddress)
+                except Exception, e:
+                    pass
+                bindPort = self.newSim((simAddress, simPort), bindPort)[1]
+                bindPort = bindPort + 1
 
-        if self.cfg.has_option(self.section,                'captureFile'):
-            self.cap_filename   = self.cfg.get(self.section,'captureFile')
+    def newSim(self, simAddr):
+        simAddr = simAddr[0], int(simAddr[1])
+        if self.active:
+            self.lock.acquire()
+            sim = self.worker.newSim(simAddr)
+            self.lock.release()
+            return self.simHost, sim.bindPort
+        raise Exception, "SimProxy is no longer running"
+
+    def newSeed(self, uri):
+        h = hash(uri)
+        self.seed[h] = uri
+        return h
+
+    def getSeed(self, h):
+        return self.seed[h]
+
+
+class PacketCapture:
+    captureSettings  = {
+                        'SimProxy': {
+                                    'templateFile'      : 'string',
+                                    'captureFile'       : 'string',
+                                    'captureFormat'     : 'string',
+                                    'captureCompression': 'int',
+                                    'storeResent'       : 'bool',
+                                    'storeBad'          : 'bool',
+                                    'allowCapture'      : 'list',
+                                    'blockCapture'      : 'list',
+                                    },
+                       }
+    def __init__(self, cfg):
+        self.loadSettings(cfg)
+        self.slTemplate = SLTemplateFactory.load(self.templateFile)
+
+    def start(self):
+        if self.captureFile:
+            Log(1, "Storing captured packets in %s" % self.captureFile)
+            self.cap_file = open(self.captureFile, 'a+b')
+            self.lock     = threading.RLock()
         else:
-            self.cap_filename   = ''
+            self.cap_file = None
 
-        cap_fmt = self.cfg.get(self.section,                'captureFormat')
-        cap_fmt = cap_fmt.lower()
-        if   cap_fmt == 'binary':
+    def loadSettings(self, cfg):
+        self.templateFile       = 'templates/1.18.1.2.txt'
+        self.captureFile        = ''
+        self.captureFormat      = 'binary'
+        self.captureCompression = 9
+        self.storeResent        = True
+        self.storeBad           = True
+        self.allowCapture       = []
+        self.blockCapture       = []
+
+        cfg.load(self, self.captureSettings)
+
+        self.captureFormat = self.captureFormat.lower()
+        if   self.captureFormat == 'binary':
             self.binaryCapture  = True
-        elif cap_fmt == 'text':
+        elif self.captureFormat == 'text':
             self.binaryCapture  = False
         else:
-            raise Exception, "Unknown capture file format: %s" % cap_fmt
-
-        self.storeResent    = self.cfg.getboolean(self.section, 'storeResent')
-        self.storeBad       = self.cfg.getboolean(self.section, 'storeBad')
-
-        if self.cfg.has_option(self.section,                 'allowCapture'):
-            self.allowCapture   = self.cfg.get(self.section, 'allowCapture')
-        else:
-            self.allowCapture   = ''
-        if self.cfg.has_option(self.section,                 'blockCapture'):
-            self.blockCapture   = self.cfg.get(self.section, 'blockCapture')
-        else:
-            self.blockCapture   = ''
-
-        self.allowCapture   = self.allowCapture.replace(' ','').split(',')
-        self.blockCapture   = self.blockCapture.replace(' ','').split(',')
-
-        while '' in self.allowCapture:
-            self.allowCapture.remove('')
-        while '' in self.blockCapture:
-            self.blockCapture.remove('')
+            raise Exception, "Unknown capture file format: %s" % self.captureFormat
 
         if '*' in self.allowCapture and self.allowCapture != ['*']:
             raise Exception, (
@@ -151,22 +183,13 @@ class SimProxy:
                 "allowCapture and blockCapture can't be both empty"
                 )
 
-        self.isBlacklist    = (self.allowCapture == ['*'])
-
-    def newSim(self, simAddr, bindPort = 0):
-        simAddr = simAddr[0], int(simAddr[1])
-        if self.active:
-            self.lock.acquire()
-            sim = self.sims.get(simAddr, None )
-            if sim is None:
-                sim = Sim(self, simAddr, bindPort)
-            self.lock.release()
-            return self.simHost, sim.bindPort
-        raise Exception, "SimProxy is no longer running"
+        self.captureAll  = (self.allowCapture == ['*'] and self.blockCapture == [])
+        self.captureNone = (self.allowCapture == [] and self.blockCapture == ['*'])
+        self.isBlacklist = (self.allowCapture == ['*'])
 
     def sniff(self, rawPacket, fromAddr, toAddr):
-        if self.cap_file:
-            if self.allowCapture != ['*']:
+        if self.cap_file and not self.captureNone:
+            if not self.captureAll:
                 try:
                     packet  = SLPacket(rawPacket, self.slTemplate)
                     msgname = packet.messageName
@@ -187,7 +210,8 @@ class SimProxy:
                     if msgname not in self.allowCapture:
                         return
             if self.binaryCapture:
-                s = self.pack(time.time(), fromAddr, toAddr, rawPacket)
+                s = self.pack(time.time(), fromAddr, toAddr, rawPacket,
+                                self.captureCompression)
             else:
                 s = self.dump(time.time(), fromAddr, toAddr, rawPacket)
             self.lock.acquire()
@@ -195,12 +219,13 @@ class SimProxy:
             self.lock.release()
 
     @staticmethod
-    def pack(timestamp, fromAddr, toAddr, rawPacket):
+    def pack(timestamp, fromAddr, toAddr, rawPacket, captureCompression = 9):
         timestamp   = SLTypes.F32.encode(timestamp)
         fromIP      = SLTypes.IPADDR.encode(fromAddr[0])
         fromPort    = SLTypes.IPPORT.encode(fromAddr[1])
         toIP        = SLTypes.IPADDR.encode(toAddr[0])
         toPort      = SLTypes.IPPORT.encode(toAddr[1])
+        rawPacket   = zlib.compress(rawPacket, captureCompression)
         rawPacket   = SLTypes.Variable.encode(rawPacket, 2)
         chunk = timestamp + fromIP + fromPort + toIP + toPort + rawPacket
         if len(chunk) != ( 4+4+2+4+2+len(rawPacket) ):
@@ -215,6 +240,7 @@ class SimProxy:
         offset, toIP        = SLTypes.IPADDR.decode(packetCapture, offset)
         offset, toPort      = SLTypes.IPPORT.decode(packetCapture, offset)
         offset, rawPacket   = SLTypes.Variable.decode(packetCapture, offset, 2)
+        rawPacket           = zlib.decompress(rawPacket)
         return offset, \
                 (timestamp, (fromIP, fromPort), (toIP, toPort), rawPacket)
 
@@ -227,8 +253,9 @@ class SimProxy:
         try:
             packet = SLPacket(rawPacket, self.slTemplate)
         except Exception, e:
-            raise                                           # XXX
-            s += 'Exception: %s\n' % str(e)
+##            raise                                           # XXX
+##            s += 'Exception: %s\n' % str(e)
+            s += traceback.format_exc()
             s += 'PACKET (%d bytes)\n' % len(rawPacket)
             s += HexDumper.dumpBlock(rawPacket, 32)
             s += '\n'
@@ -240,208 +267,197 @@ class SimProxy:
             s += packet.dump(decodeData = True)
         except Exception, e:
 ##            raise                                           # XXX
-            s += 'Exception: %s\n' % str(e)
+##            s += 'Exception: %s\n' % str(e)
+            s += traceback.format_exc()
             try:
                 s += packet.dump(decodeData = False)
             except Exception, e:
-                s += 'Exception: %s\n' % str(e)
+##                s += 'Exception: %s\n' % str(e)
+                s += traceback.format_exc()
                 s += 'PACKET (%d bytes)\n' % len(rawPacket)
                 s += HexDumper.dumpBlock(rawPacket, 32)
         s += '\n'
+
+##        # XXX DEBUG
+##        # re encode the packet and verify the contents are the same
+##        packet.decode()
+##        packet.delBlockData()
+##        reencodedPacket = str(packet)
+##        if reencodedPacket != rawPacket:
+##            s += 'ENCODING ERROR!\n'
+##            s += self.dump(timestamp, fromAddr, toAddr, reencodedPacket)
+####            raise Exception, "Oops!"
+
         return s
 
 
-class Sim:
+class ProxySocket:
 
-    def __init__(self, proxy, simAddr, bindPort = 0):
-        self.proxy      = proxy
-        self.simAddr    = simAddr
+    def __init__(self,
+                    peerAddress,
+                    peerPort,
+                    bindAddress = '0.0.0.0',
+                    bindPort    = 0
+    ):
+        self.peerAddress, self.peerPort = peerAddress, peerPort
+        self.bindAddress, self.bindPort = bindAddress, bindPort
 
-        self.addrToSock = {}  # (client ip, client port) -> socket
-        self.sockToAddr = {}  # socket -> (client ip, client port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind( (self.bindAddress, self.bindPort) )
 
-        self.loggedErrorForSock = {}
+        self.bindAddress, self.bindPort = self.sock.getsockname()
 
-        self.serverSock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.serverSock.bind( (self.proxy.bindAddress, bindPort) )
+        Log(1,
+            self.new_message % \
+                (self.peerAddress, self.peerPort, self.bindPort)
+            )
 
-        self.bindAddress    = self.proxy.bindAddress
-        self.bindPort       = self.serverSock.getsockname()[1]
+    def close(self):
+        self.sock.close()
+        del self.sock
+        Log(1,
+            self.die_message % \
+                (self.peerAddress, self.peerPort, self.bindPort)
+            )
 
-        self.active     = True
+    def send(self, packet):
+        rawPacket = str(packet)
+        return self.sock.sendto(rawPacket, (self.peerAddress, self.peerPort))
+
+    def sendto(self, packet, addr):
+        rawPacket = str(packet)
+        return self.sock.sendto(rawPacket, addr)
+
+    def recv(self, size = 0xFFFF):
+        return self.sock.recv(size)
+
+    def recvfrom(self, size = 0xFFFF):
+        return self.sock.recvfrom(size)
+
+
+class Sim(ProxySocket):
+    new_message = "New sim proxy to %s:%d on port %d"
+    die_message = "Shut down sim proxy to %s:%d on port %d"
+
+    def connect(self, *listArgs, **dictArgs):
+        return Viewer(*listArgs, **dictArgs)
+
+
+class Viewer(ProxySocket):
+    new_message = "New viewer connected from %s:%d proxied from port %d"
+    die_message = "Shut down viewer connected from %s:%d proxied from port %d"
+
+    def connect(self, *listArgs, **dictArgs):
+        return Sim(*listArgs, **dictArgs)
+
+
+class Worker:
+
+    def __init__(self, main):
+        self.main       = main
+        self.active     = False
         self.event      = threading.Event()
-        self.event.clear()
+        self.event.set()
 
-        thread.start_new_thread(Sim.run, (self,))
+    def start(self):
+        if not self.active:
+            self.active = True
+            self.event.clear()
+            thread.start_new_thread(self.__run, ())
 
     def kill(self):
-        Log(1, "Shutting down Sim %s:%d..." % self.simAddr)
-        self.active = False
-        try:
-            del self.proxy.sims[self.simAddr]
-        except KeyError, e:
-            pass
-        self.event.wait(2.0)
+        if self.active:
+            self.active = False
+            self.event.wait()
 
-    def suicide(self):
-        Log(1, "Shutting down Sim %s:%d..." % self.simAddr)
+    def die(self):
         self.active = False
+        self.event.set()
+
+    def __run(self):
         try:
-            del self.proxy.sims[self.simAddr]
-        except KeyError, e:
-            pass
+            self.run()
+        except Exception, e:
+            Log.logException()
+            self.die()
+
+
+class Selector(Worker):
+
+    def __init__(self, main):
+        Worker.__init__(self, main)
+
+        self.byAddr   = {}      # (host, port) -> Sim or Viewer
+        self.bySock   = {}      # socket -> Sim or Viewer
 
     def run(self):
-        Log(1, "New Sim %s:%d proxied on port %d" % (self.simAddr + (self.bindPort,)))
+        while self.active:
+            self.select()
+        self.die()
 
-        # main loop
+    def newSim(self, simAddr):
+        return self.listen(Sim, simAddr)
+
+    def newViewer(self, viewerAddr):
+        return self.listen(Viewer, viewerAddr)
+
+    def listen(self, ProxySockClass, peerAddr):
+        if not self.byAddr.has_key(peerAddr):
+            new_proxy = ProxySockClass(*peerAddr)
+            self.byAddr[peerAddr]       = new_proxy
+            self.bySock[new_proxy.sock] = new_proxy
+        return self.byAddr[peerAddr]
+
+    def connect(self, proxy, peerAddr):
+        if not self.byAddr.has_key(peerAddr):
+            new_proxy = proxy.connect(*peerAddr)
+            self.byAddr[peerAddr]       = new_proxy
+            self.bySock[new_proxy.sock] = new_proxy
+        return self.byAddr[peerAddr]
+
+    def select(self):
+        socketList = self.bySock.keys()
+        if socketList:
+            socketList = select.select(socketList, [], [], 1)[0]
+            for s in socketList:
+                try:
+                    proxyTo     = self.bySock[s]
+                    fromViewer  = (proxyTo.__class__ == Sim)
+                    rawPacket, fromAddr = proxyTo.recvfrom()
+                    proxyFrom   = self.connect(proxyTo, fromAddr)
+                    toAddr      = (proxyTo.peerAddress, proxyTo.peerPort)
+                    isReply, newPacket = self.filterPacket(rawPacket, fromViewer)
+                    if newPacket:
+                        if isReply:
+                            proxyFrom.sendto(newPacket, fromAddr)
+                            self.capturePacket(rawPacket, fromAddr, toAddr)
+                            self.capturePacket(newPacket, toAddr, fromAddr)
+                        else:
+                            proxyFrom.sendto(newPacket, toAddr)
+                            self.capturePacket(newPacket, fromAddr, toAddr)
+                except Exception, e:
+                    Log.logException()
+
+    def capturePacket(self, rawPacket, fromAddr, toAddr):
+        self.main.pktCapture.sniff(rawPacket, fromAddr, toAddr)
+
+    def filterPacket(self, rawPacket, fromViewer):
+        isReply = False
         try:
-            while self.active:
-
-                # select all sockets
-                socketList = [ self.serverSock ] + self.sockToAddr.keys()
-                socketList = select.select(socketList, [], [], 1.0)[0]
-
-                # proxy data client -> server
-                if self.serverSock in socketList:
-                    socketList.remove(self.serverSock)
-                    try:
-                        self.proxyClientToServer()
-                    except Exception, e:
-##                        raise       # XXX
-                        pass
-
-                # proxy data server -> client
-                for clientSocket in socketList:
-                    try:
-                        self.proxyServerToClient(clientSocket)
-                    except Exception, e:
-##                        raise       # XXX
-                        pass
-
-        # clean up
-        finally:
-
-            # close all sockets
-            self.serverSock.close()
-            for clientSock in self.sockToAddr.keys():
-                clientSock.close()
-            self.addrToSock = {}
-            self.sockToAddr = {}
-
-            # signal we're done cleaning up
-            self.event.set()
-
-            Log(1, "Shut down Sim %s:%d" % self.simAddr)
-
-    def connectClient(self, clientAddr):
-##        print "connectClient", clientAddr, self.simAddr         # XXX
-        clientSock = self.addrToSock.get(clientAddr, None)
-        if clientSock is None:
-            clientSock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            clientSock.bind( ('0.0.0.0', 0) )
-##            clientSock.connect(self.simAddr)
-            self.addrToSock[clientAddr] = clientSock
-            self.sockToAddr[clientSock] = clientAddr
-            Log(1,
-                "Client %s:%d connected to Sim %s:%d" % \
-                (clientAddr + self.simAddr)
-                )
-        return clientSock
-
-    def disconnectClient(self, clientSock):
-##        print "disconnectClient", clientSock.fileno()           # XXX
-        toAddr = self.sockToAddr[clientSock]
-        del self.addrToSock[toAddr]
-        del self.sockToAddr[clientSock]
-
-    def proxyClientToServer(self):
-##        print "proxyClientToServer", self.serverSock.fileno()   # XXX
-        try:
-            rawPacket, fromAddr = self.serverSock.recvfrom(65535)
+            packet      = SLPacket(rawPacket, self.main.pktCapture.slTemplate)
+            result      = self.main.msgFilter.run(fromViewer, packet)
+            if result is not None:
+                isReply, packet = result
+                rawPacket       = str(packet)
         except Exception, e:
-            self.logErrorForSock(
-                self.serverSock,
-                "proxyClientToServer (reading from client): %s" % str(e)
-                )
-            self.suicide()
-            raise
-        toAddr = self.simAddr
-        self.proxy.sniff(rawPacket, fromAddr, toAddr)
-        self.filterClientToServer(rawPacket, fromAddr, toAddr)
-        try:
-            clientSock = self.connectClient(fromAddr)
-        except Exception, e:
-            self.logErrorForSock(
-                self.serverSock,
-                "proxyClientToServer (connecting to server): %s" % str(e)
-                )
-            raise
-        try:
-            sentBytes = clientSock.sendto(rawPacket, toAddr)
-        except Exception, e:
-            self.logErrorForSock(
-                self.serverSock,
-                "proxyClientToServer (writing to server): %s" % str(e)
-                )
-            self.disconnectClient(clientSock)
-            raise
-
-    def proxyServerToClient(self, clientSock):
-##        print "proxyServerToClient", clientSock.fileno()        # XXX
-        try:
-            rawPacket, fromAddr = clientSock.recvfrom(65535)
-        except Exception, e:
-            self.logErrorForSock(
-                self.serverSock,
-                "proxyServerToClient (reading from server): %s" % str(e)
-                )
-            self.disconnectClient(clientSock)
-            raise
-        toAddr = self.sockToAddr[clientSock]
-        self.proxy.sniff(rawPacket, fromAddr, toAddr)
-        self.filterServerToClient(rawPacket, fromAddr, toAddr)
-        try:
-            sentBytes = self.serverSock.sendto(rawPacket, toAddr)
-        except Exception, e:
-            self.logErrorForSock(
-                self.serverSock,
-                "proxyServerToClient (writing to client): %s" % str(e)
-                )
-            self.suicide()
-            raise
-
-    def __filterPacket(self, isClient, rawPacket, fromAddr, toAddr):
-        try:
-            packet = SLPacket(rawPacket, self.proxy.slTemplate)
-            params = (packet, fromAddr, toAddr)
-            result = self.proxy.msgFilter.run(self.proxy, isClient, *params)
-            (newPacket, fromAddr, toAddr) = result
-            if newPacket != packet:
-                rawPacket = str(newPacket)
-            return (rawPacket, fromAddr, toAddr)
-        except Exception, e:
-            raise                       # XXX
-            return params
-
-    def filterClientToServer(self, *listArgs, **dictArgs):
-        self.__filterPacket(True, *listArgs, **dictArgs)
-
-    def filterServerToClient(self, *listArgs, **dictArgs):
-        self.__filterPacket(False, *listArgs, **dictArgs)
-
-    def logErrorForSock(self, sock, errtext):
-        if not self.loggedErrorForSock.has_key(sock):
-            self.loggedErrorForSock[sock] = None
-            try:
-                Log(1, "Socket %d: %s" % (sock.fileno(), errtext))
-            except Exception, e:
-                pass
+            Log.logException()
+        return isReply, rawPacket
 
 
 if __name__ == "__main__":
     scriptname  = os.path.basename(sys.argv[0])
-    filename    = os.path.splitext(scriptname)[0] + '.cfg'
+##    filename    = os.path.splitext(scriptname)[0] + '.cfg'
+    filename = 'SimProxy.cfg'
     if len(sys.argv) > 1:
         if sys.argv[1].lower() in ('-h', '-help', '--help'):
             print "%s [alternate config file]" % scriptname
