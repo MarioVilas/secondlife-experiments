@@ -17,7 +17,8 @@ def dump(pc, binfilename, txtfilename):
 
     while( (len(capture) - offset) != 0 ):
         offset, entry = pc.unpack(capture, offset)
-        text = pc.dump(*entry)
+##        text = pc.dump(*entry)
+        text = pc.dump(namesOnly = True, *entry)
         if text:
             textfile.write(text)
             packetCount += 1

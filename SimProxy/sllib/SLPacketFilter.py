@@ -20,14 +20,14 @@ class SLPacketFilter(Dispatcher):
         name        = packet.messageName
         filterlist  = self.getFilters(name)
         if fromViewer:
-            Log(4, "Received viewer message %s" % name)
+            Log(4, "Viewer %s" % name)
         else:
-            Log(4, "Received sim message %s" % name)
+            Log(4, "Sim %s" % name)
         if len(filterlist) > 0:
             if fromViewer:
-                Log(3, "Filtering viewer message %s" % name)
+                Log(3, "Filtering from viewer %s" % name)
             else:
-                Log(3, "Filtering sim message %s" % name)
+                Log(3, "Filtering from sim %s" % name)
             for fn in filterlist:
                 result = fn(fromViewer, packet)
                 if result is None:  continue        # ignore the packet

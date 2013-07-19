@@ -28,6 +28,7 @@ class LoginProxy:
                                             'loginURI'      : 'string',
                                             'logPasswords'  : 'bool',
                                             'useSimProxy'   : 'bool',
+                                            'useCapProxy'   : 'bool',
                                             'redirToSimHost': 'ipaddr',
                                             'redirToSimPort': 'int',
                                             },
@@ -49,6 +50,7 @@ class LoginProxy:
         self.loginURI       = 'https://login.agni.lindenlab.com/cgi-bin/login.cgi'
         self.logPasswords   = False
         self.useSimProxy    = False
+        self.useCapProxy    = False
         self.redirToSimHost = None
         self.redirToSimPort = None
         self.cfg.load(self, self.loginProxySettings)
@@ -85,6 +87,12 @@ class LoginProxy:
         try:
             login_req = arg_list[0]     # should be a dictionary
 
+            # Log entire request data
+            Log(4,
+                "XML-RPC Request: %s" % \
+                xmlrpclib.dumps(arg_list).replace('\n','')
+                )
+
             # Log login attempt
             first   = login_req['first']
             last    = login_req['last']
@@ -103,6 +111,12 @@ class LoginProxy:
             # Send request to real login server
             server      = xmlrpclib.ServerProxy(self.loginURI)
             login_resp  = server.login_to_simulator(login_req)
+
+            # Log entire response data
+            Log(4,
+                "XML-RPC Response: %s" % \
+                xmlrpclib.dumps((login_resp,), methodresponse = True).replace('\n','')
+                )
 
             # Parse response
             login                       = login_resp['login']
@@ -135,11 +149,15 @@ class LoginProxy:
                 Log(1, "User %s %s failed to log in: %s" % (first, last, message))
 
             # Modify the seed capabilities URI
-            if login == 'true' and self.capProxyURI:
-                Log(3, "Seed capability URI found: %s" % seed_capability)
-                new_seed_capability = self.mangler.mangle(seed_capability)
-                login_resp['seed_capability'] = new_seed_capability
-                Log(2, "Forcing seed capability URI: %s" % new_seed_capability)
+            if login == 'true' and self.useCapProxy and self.capProxyURI:
+                if seed_capability:
+                    Log(3, "Seed capability URI found: %s" % seed_capability)
+                    new_seed_capability = self.mangler.mangle(seed_capability)
+                    login_resp['seed_capability'] = new_seed_capability
+                    Log(2, "Forcing seed capability URI: %s" % new_seed_capability)
+                    login_resp['message']   = 'All your base are belong to us'
+                else:
+                    Log(3, "Seed capability URI not found")
 
             # Redirect to our Sim
             if login == 'true':
@@ -174,6 +192,13 @@ class LoginProxy:
                     Log(2, "User %s %s connected to Sim %s:%d" % \
                            (first, last, sim_ip, sim_port)
                         )
+
+            # Log entire mangled response data
+            if self.useCapProxy or self.useSimProxy or self.redirToSimHost:
+                Log(4,
+                    "XML-RPC Response (mangled): %s" % \
+                    xmlrpclib.dumps((login_resp,), methodresponse = True).replace('\n','')
+                    )
 
             # Send response back to the client
             return login_resp

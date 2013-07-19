@@ -7,15 +7,18 @@ import socket
 import xmlrpclib
 import urlparse
 import urllib2
+import httplib
 import re
 import base64
 import struct
 import zlib
+import types
 
 from sllib import SLTypes
 from sllib.Logger import Log
 from sllib.Config import Config
 from sllib.LLSD import LLSD
+from sllib.HTTP import HTTPClient, HTTPRequest, HTTPResponse, HTTPException
 from sllib.WebServer import WebServer, RequestHandler
 
 
@@ -59,13 +62,14 @@ class CapProxy:
         else:
             self.captureFile    = None
 
-        self.server         = WebServer(self, self.section, CapProxyHandler)
-        self.server.mangler = CapProxyURIMangler(self.capProxyURI,
-                                                 self.simProxyURI,
-                                                 remote = False
-                                                )
-        self.server.sim     = CapProxySimIntercept(self.simProxyURI)
-        self.server.main    = self
+        self.handler            = CapProxyHandler(self)
+        self.server             = WebServer(self, self.section, self.handler)
+        self.handler.sim        = CapProxySimIntercept(self.simProxyURI)
+        self.handler.mangler    = CapProxyURIMangler(self.capProxyURI,
+                                                     self.simProxyURI,
+                                                     remote = True      # XXX
+##                                                     remote = False
+                                                    )
         self.server.start()
         Log(1, "CapProxy loaded successfully")
 
@@ -227,7 +231,46 @@ class CapProxySimIntercept:
         return simAddr
 
     def change_xml(self, xml):
-        
+        try:
+            ll = LLSD.fromstring(xml)
+            if type(ll) == types.DictType and ll.has_key('events'):
+                do_encode = False
+                for msg in ll['events']:
+                    name = msg['message']
+                    body = msg['body']
+                    Log(4, name)
+                    if   name == 'EstablishAgentCommunication':
+                        do_encode = True
+                        seed_cap = body['seed-capability']
+                        ip_port  = body['sim-ip-and-port']
+                        sim_ip, sim_port = ip_port.split(':')
+                        sim_port = int(sim_port)
+                        sim_ip, sim_port = self.newSim((sim_ip, sim_port))
+                        ip_port  = '%s:%d' % (sim_ip, sim_port)
+                        body['sim-ip-and-port'] = ip_port
+                    elif name in ('CrossedRegion', 'TeleportFinish'):
+                        do_encode = True
+                        if name == 'CrossedRegion':
+                            info = body['RegionData']
+                        elif name == 'TeleportFinish':
+                            info = body['Info']
+                        sim_ip   = info['SimIP']
+                        sim_port = info['SimPort']
+                        seed_cap = info['SeedCapability']
+                        sim_ip   = socket.inet_ntoa(str(sim_ip))
+                        sim_ip, sim_port = self.newSim((sim_ip, sim_port))
+                        sim_ip   = LLSD.LLElement(socket.inet_aton(sim_ip))
+                        sim_ip.set_llsd( info['SimIP'].get_llsd() )
+                        info['SimIP']   = sim_ip
+                        info['SimPort'] = sim_port
+                if do_encode:
+                    return LLSD.tostring(ll)
+            return xml
+        except Exception, e:
+            Log.logException()
+            return self.generic_change_xml(xml)
+
+    def generic_change_xml(self, xml):
         # <key>sim-ip-and-port</key>
         # <string>63.210.157.71:13006</string>
         s = self.__ip_find.search(xml)
@@ -275,114 +318,161 @@ class CapProxySimIntercept:
 
 class CapProxyHandler(RequestHandler):
 
-    def do_POST(self):
+    def __init__(self, main):
+        self.main = main
+
+    def do_POST(self, server, request, addr):
         try:
-            # Get arguments by reading body of request.
-            # We read this in chunks to avoid straining
-            # socket.read(); around the 10 or 15Mb mark, some platforms
-            # begin to have problems (bug #792570).
-            max_chunk_size = 10*1024*1024
-            size_remaining = int(self.headers["Content-length"])
-            L = []
-            while size_remaining:
-                chunk_size = min(size_remaining, max_chunk_size)
-                L.append(self.rfile.read(chunk_size))
-                size_remaining -= len(L[-1])
-            request = ''.join(L)
+            print "\n\nURL: %r\n\n" % request.getpath()             # XXX
+            
+            # Get the request data, if any
+            if request.hasdata():
+                reqdata = request.getdata()
+            else:
+                reqdata = ''
 
             # If the request is not mangled, return a 404 error
-            path = self.path
-            if not self.server.mangler.is_mangled(path):
-                raise HTTPError(
-                    self.server.mangler.absolute(path),
+            path = request.getpath()
+            if not self.mangler.is_mangled(path):
+                raise urllib2.HTTPError(
+                    self.mangler.absolute(path),
                     404, 'Not found',
                     'Content-length: 0\r\n\r\n',
                     None)
+            path = self.mangler.unmangle(path)
 
-            # Store the request
-            fd = self.server.main.captureFile
-            if fd:
-                cap_level = self.server.main.captureCompression
-                cap_data = CapProxyCapture.packRequest(path, request, cap_level)
-                fd.write(cap_data)
+            # If we have request data...
+            if reqdata:
 
-            # Unmangle the request
-##            while self.server.mangler.is_mangled(path):
-            Log(3, 'Mangled URI: %s' % path)
-            path = self.server.mangler.unmangle(path)
-            Log(2, "Requested URI: %s" % path)
-            Log(3, "Request data: %r" % request)
-            unmangled_req = self.server.mangler.unmangle_xml(request)
-            if unmangled_req != request:
-                request = unmangled_req
-                Log(3, "Unmangled request data: %r" % request)
+                # Store the request data
+                fd = self.main.captureFile
+                if fd:
+                    cap_level = self.main.captureCompression
+                    cap_data = CapProxyCapture.packRequest(path, reqdata, cap_level)
+                    fd.write(cap_data)
 
-            # Store the request
-            fd = self.server.main.captureFile
-            if fd:
-                cap_level = self.server.main.captureCompression
-                cap_data = CapProxyCapture.packRequest(path, request, cap_level)
-                fd.write(cap_data)
+                # Unmangle the request data
+                Log(3, 'Mangled URI: %s' % path)
+                path = self.mangler.unmangle(path)
+                Log(2, "Requested URI: %s" % path)
+                Log(3, "Request data: %r" % reqdata)
+                unmangled_req = self.mangler.unmangle_xml(reqdata)
+                if unmangled_req != reqdata:
+                    reqdata = unmangled_req
+                    Log(3, "Unmangled request data: %r" % reqdata)
+
+                # Store the modified request data
+                fd = self.main.captureFile
+                if fd:
+                    cap_level = self.main.captureCompression
+                    cap_data = CapProxyCapture.packRequest(path, reqdata, cap_level)
+                    fd.write(cap_data)
 
             # Proxy the request
-            response = urllib2.urlopen(path, request).read()
-            Log(3, "Response data: %r" % response)
+            new_req = HTTPRequest.fromurl(path, version=request.getversion())
+            new_req.setmethod(request.getmethod())
+            new_req.setdata(reqdata)
+            if new_req.has_key('Host'):
+                new_host = new_req['Host']
+                new_req.setallheaders(request.getallheaders())
+                new_req['Host'] = new_host
+            else:
+                new_req.setallheaders(request.getallheaders())
+##            client = HTTPClient.fromurl(path)
+##            client.write(new_req)
+##            response = client.readresponse()
+##            if response.hasdata():
+##                respdata = response.getdata()
+##            else:
+##                respdata = ''
+            response = HTTPResponse.fromurl(path, reqdata)
+            response.setversion(request.getversion())   # XXX this is a hack!
+##            print repr(response.getdata())
+            if response.hasdata():
+                respdata = response.getdata()
+            else:
+                respdata = ''
 
-            # Store the response
-            fd = self.server.main.captureFile
-            if fd:
-                cap_level = self.server.main.captureCompression
-                cap_data = CapProxyCapture.packResponse(response, cap_level)
-                fd.write(cap_data)
+            if respdata:
+                Log(3, "Response data: %r" % respdata)
 
-            # Parse the response
-            if self.server.main.interceptURLs:
-                try:
-                    response = self.server.mangler.mangle_xml(response)
-                except Exception, e:
-                    Log.logException()
-            if self.server.main.useSimProxy:
-                try:
-                    response = self.server.sim.change_xml(response)
-                except Exception, e:
-                    Log.logException()
+                # Store the response data
+                fd = self.main.captureFile
+                if fd:
+                    cap_level = self.main.captureCompression
+                    cap_data = CapProxyCapture.packResponse(respdata, cap_level)
+                    fd.write(cap_data)
 
-            # Log the modified response data
-            if self.server.main.interceptURLs or self.server.main.useSimProxy:
-                Log(3, "Modified response data: %r" % response)
+                # Mangle the response data
+                if self.main.interceptURLs:
+                    try:
+                        respdata = self.mangler.mangle_xml(respdata)
+                    except Exception, e:
+                        Log.logException()
+                if self.main.useSimProxy:
+                    try:
+                        respdata = self.sim.change_xml(respdata)
+                    except Exception, e:
+                        Log.logException()
 
-            # Store the response
-            fd = self.server.main.captureFile
-            if fd:
-                cap_level = self.server.main.captureCompression
-                cap_data = CapProxyCapture.packResponse(response, cap_level)
-                fd.write(cap_data)
+                # Log the response data
+                if self.main.interceptURLs or self.main.useSimProxy:
+                    Log(3, "Modified response data: %r" % respdata)
+
+                # Store the response data
+                fd = self.main.captureFile
+                if fd:
+                    cap_level = self.main.captureCompression
+                    cap_data = CapProxyCapture.packResponse(respdata, cap_level)
+                    fd.write(cap_data)
+
+            # return the mangled response data
+            response.setdata(respdata)
 
         except urllib2.HTTPError, e:
             Log.logException(2)
 ##            Log.logException(2, print_tb = False)
-            if self.request_version != 'HTTP/0.9':
-                self.wfile.write("%s %d %s\r\n" %
-                                 (self.protocol_version, e.code, e.msg))
-            self.wfile.write(e.hdrs)
+            server.writeresponse(
+                version = request.getversion(),
+                code    = e.code,
+                desc    = e.msg,
+                hdr     = str(e.hdrs)
+                )
+            server.close()
 
         except Exception, e:
             # This should only happen if the module is buggy
             # internal error, report as HTTP server error
             Log.logException(2)
-            self.send_response(500)
-            self.end_headers()
+            server.writeresponse(
+                version = request.getversion(),
+                code    = 500,
+                hdr     = 'Connection: close'
+                )
+            server.close()
 
         else:
-            if response is not None:
-                # got a valid response
-                self.send_response(200)
-                self.send_header("Content-type", "text/xml")
-                self.send_header("Content-length", str(len(response)))
-                self.send_header("Connection", "persistent")
-                self.end_headers()
-                self.wfile.write(response)
-                self.wfile.flush()
+            try:
+                if response:
+                    # got a valid response
+                    server.write(response)
+                    if response.get('Connection','close').lower().find('close')>0:
+                        server.close()
+                else:
+                    Log(2, 'No valid response was parsed')
+                    server.writeresponse(
+                        version = request.getversion(),
+                        code    = 404,
+                        hdr     = 'Connection: close'
+                        )
+                    server.close()
+            except Exception, e:
+                # This should only happen if the module is buggy
+                Log.logException(2)
+
+    # we need to handle GET requests too
+    # some URLs are not really part of the protocol but regular html pages
+    do_GET = do_POST
 
 
 if __name__ == "__main__":

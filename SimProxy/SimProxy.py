@@ -244,7 +244,7 @@ class PacketCapture:
         return offset, \
                 (timestamp, (fromIP, fromPort), (toIP, toPort), rawPacket)
 
-    def dump(self, timestamp, fromAddr, toAddr, rawPacket):
+    def dump(self, timestamp, fromAddr, toAddr, rawPacket, namesOnly = False):
         s = '[%f] %s:%d -> %s:%d\n'
         s = s % (timestamp, fromAddr[0], fromAddr[1], toAddr[0], toAddr[1])
 
@@ -259,6 +259,12 @@ class PacketCapture:
             s += 'PACKET (%d bytes)\n' % len(rawPacket)
             s += HexDumper.dumpBlock(rawPacket, 32)
             s += '\n'
+            return s
+
+        # this will dump only the message names, rather than it's contents
+        if namesOnly:
+            s = s[:-1]
+            s += '\t%s\n' % packet.messageName
             return s
 
         # try to decode the message data
